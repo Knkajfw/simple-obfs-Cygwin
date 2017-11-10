@@ -86,11 +86,6 @@ case $host in
     ;;
 esac
 
-dnl Checks for pthread
-AX_PTHREAD([LIBS="$PTHREAD_LIBS $LIBS"
-            CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-            CC="$PTHREAD_CC"], AC_MSG_ERROR(Can not find pthreads.  This is required.))
-
 dnl Checks for stack protector
 GGL_CHECK_STACK_PROTECTOR([has_stack_protector=yes], [has_stack_protector=no])
 # XXX - disable -fstack-protector due to missing libssp_nonshared
@@ -173,8 +168,6 @@ case $host in
     #include <sys/socket.h>
     #endif
     ]])
-    dnl Checks for c-ares headers
-    AC_CHECK_HEADERS([ares.h], [], [AC_MSG_ERROR([Couldn't find libcares. Try installing libc-ares-dev or c-ares-devel.])], [])
     ;;
   *)
     # These are POSIX-like systems using BSD-like sockets API.
@@ -237,8 +230,6 @@ AC_CHECK_LIB(socket, connect)
 
 dnl Checks for library functions.
 AC_CHECK_FUNCS([malloc memset socket])
-
-AC_CHECK_LIB([cares], [ares_library_init], [LIBS="-lcares $LIBS"], [AC_MSG_ERROR([Couldn't find libc-ares. Try installing libc-ares-dev or c-ares-devel.])])
 
 AC_CHECK_LIB([ev], [ev_loop_destroy], [LIBS="-lev $LIBS"], [AC_MSG_ERROR([Couldn't find libev. Try installing libev-dev@<:@el@:>@.])])
 
