@@ -51,6 +51,9 @@
 
 #ifdef __MINGW32__
 #include "win32.h"
+#define __ev_io_init(a, b, c, d) ev_io_init(a, b, _open_osfhandle(c, 0), d)
+#else
+#define __ev_io_init(a, b, c, d) ev_io_init(a, b, c, d)
 #endif
 
 #include "netutils.h"
@@ -104,7 +107,9 @@ static void server_send_cb(EV_P_ ev_io *w, int revents);
 static void remote_recv_cb(EV_P_ ev_io *w, int revents);
 static void remote_send_cb(EV_P_ ev_io *w, int revents);
 static void accept_cb(EV_P_ ev_io *w, int revents);
+#ifndef __MINGW32__
 static void signal_cb(EV_P_ ev_signal *w, int revents);
+#endif
 
 static int create_and_bind(const char *addr, const char *port);
 #ifdef HAVE_LAUNCHD
@@ -667,8 +672,8 @@ new_remote(int fd, int timeout)
     remote->recv_ctx->remote    = remote;
     remote->send_ctx->remote    = remote;
 
-    ev_io_init(&remote->recv_ctx->io, remote_recv_cb, fd, EV_READ);
-    ev_io_init(&remote->send_ctx->io, remote_send_cb, fd, EV_WRITE);
+    __ev_io_init(&remote->recv_ctx->io, remote_recv_cb, fd, EV_READ);
+    __ev_io_init(&remote->send_ctx->io, remote_send_cb, fd, EV_WRITE);
     ev_timer_init(&remote->send_ctx->watcher, remote_timeout_cb,
                   min(MAX_CONNECT_TIMEOUT, timeout), 0);
     ev_timer_init(&remote->recv_ctx->watcher, remote_timeout_cb,
@@ -731,8 +736,8 @@ new_server(int fd)
         memset(server->obfs, 0, sizeof(obfs_t));
     }
 
-    ev_io_init(&server->recv_ctx->io, server_recv_cb, fd, EV_READ);
-    ev_io_init(&server->send_ctx->io, server_send_cb, fd, EV_WRITE);
+    __ev_io_init(&server->recv_ctx->io, server_recv_cb, fd, EV_READ);
+    __ev_io_init(&server->send_ctx->io, server_send_cb, fd, EV_WRITE);
 
     cork_dllist_add(&connections, &server->entries);
 
@@ -822,6 +827,7 @@ create_remote(listen_ctx_t *listener,
     return remote;
 }
 
+#ifndef __MINGW32__
 static void
 signal_cb(EV_P_ ev_signal *w, int revents)
 {
@@ -829,14 +835,13 @@ signal_cb(EV_P_ ev_signal *w, int revents)
         switch (w->signum) {
         case SIGINT:
         case SIGTERM:
-#ifndef __MINGW32__
         case SIGUSR1:
-#endif
             keep_resolving = 0;
             ev_unloop(EV_A_ EVUNLOOP_ALL);
         }
     }
 }
+#endif
 
 void
 accept_cb(EV_P_ ev_io *w, int revents)
@@ -1202,6 +1207,7 @@ main(int argc, char **argv)
     listen_ctx.iface   = iface;
     listen_ctx.mptcp   = mptcp;
 
+#ifndef __MINGW32__
     // Setup signal handler
     struct ev_signal sigint_watcher;
     struct ev_signal sigterm_watcher;
@@ -1209,12 +1215,13 @@ main(int argc, char **argv)
     ev_signal_init(&sigterm_watcher, signal_cb, SIGTERM);
     ev_signal_start(EV_DEFAULT, &sigint_watcher);
     ev_signal_start(EV_DEFAULT, &sigterm_watcher);
-
-    ev_timer parent_watcher;
-#ifndef __MINGW32__
-    ev_timer_init(&parent_watcher, parent_watcher_cb, 0, UPDATE_INTERVAL);
 #endif
+
+#ifndef __MINGW32__
+    ev_timer parent_watcher;
+    ev_timer_init(&parent_watcher, parent_watcher_cb, 0, UPDATE_INTERVAL);
     ev_timer_start(EV_DEFAULT, &parent_watcher);
+#endif
 
     struct ev_loop *loop = EV_DEFAULT;
 
@@ -1235,7 +1242,7 @@ main(int argc, char **argv)
 
     listen_ctx.fd = listenfd;
 
-    ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
+    __ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
     ev_io_start(loop, &listen_ctx.io);
 
 #ifdef HAVE_LAUNCHD
@@ -1279,10 +1286,10 @@ main(int argc, char **argv)
 
 #ifdef __MINGW32__
     winsock_cleanup();
-#endif
-
+#else
     ev_signal_stop(EV_DEFAULT, &sigint_watcher);
     ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
+#endif
 
     return 0;
 }
