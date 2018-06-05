@@ -49,13 +49,6 @@
 
 #include <libcork/core.h>
 
-#ifdef __MINGW32__
-#include "win32.h"
-#define __ev_io_init(a, b, c, d) ev_io_init(a, b, _open_osfhandle(c, 0), d)
-#else
-#define __ev_io_init(a, b, c, d) ev_io_init(a, b, c, d)
-#endif
-
 #include "netutils.h"
 #include "utils.h"
 #include "obfs_http.h"
@@ -107,9 +100,7 @@ static void server_send_cb(EV_P_ ev_io *w, int revents);
 static void remote_recv_cb(EV_P_ ev_io *w, int revents);
 static void remote_send_cb(EV_P_ ev_io *w, int revents);
 static void accept_cb(EV_P_ ev_io *w, int revents);
-#ifndef __MINGW32__
 static void signal_cb(EV_P_ ev_signal *w, int revents);
-#endif
 
 static int create_and_bind(const char *addr, const char *port);
 #ifdef HAVE_LAUNCHD
@@ -354,6 +345,50 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                     if (s == 0) {
                         s = send(remote->fd, remote->buf->data, remote->buf->len, 0);
                     }
+#elif defined(TCP_FASTOPEN_WINSOCK)
+                    DWORD s = -1;
+                    DWORD err = 0;
+                    do {
+                        int optval = 1;
+                        // Set fast open option
+                        if (setsockopt(remote->fd, IPPROTO_TCP, TCP_FASTOPEN,
+                                       &optval, sizeof(optval)) != 0) {
+                            ERROR("setsockopt");
+                            break;
+                        }
+                        // Load ConnectEx function
+                        LPFN_CONNECTEX ConnectEx = winsock_getconnectex();
+                        if (ConnectEx == NULL) {
+                            LOGE("Cannot load ConnectEx() function");
+                            err = WSAENOPROTOOPT;
+                            break;
+                        }
+                        // ConnectEx requires a bound socket
+                        if (winsock_dummybind(remote->fd,
+                                              (struct sockaddr *)&(remote->addr)) != 0) {
+                            ERROR("bind");
+                            break;
+                        }
+                        // Call ConnectEx to send data
+                        memset(&remote->olap, 0, sizeof(remote->olap));
+                        remote->connect_ex_done = 0;
+                        if (ConnectEx(remote->fd, (const struct sockaddr *)&(remote->addr),
+                                      remote->addr_len, remote->buf->data, remote->buf->len,
+                                      &s, &remote->olap)) {
+                            remote->connect_ex_done = 1;
+                            break;
+                        };
+                        // XXX: ConnectEx pending, check later in remote_send
+                        if (WSAGetLastError() == ERROR_IO_PENDING) {
+                            err = CONNECT_IN_PROGRESS;
+                            break;
+                        }
+                        ERROR("ConnectEx");
+                    } while(0);
+                    // Set error number
+                    if (err) {
+                        SetLastError(err);
+                    }
 #else
                     int s = sendto(remote->fd, remote->buf->data, remote->buf->len, MSG_FASTOPEN,
                                    (struct sockaddr *)&(remote->addr), remote->addr_len);
@@ -388,7 +423,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                         // Just connected
                         remote->buf->idx = 0;
                         remote->buf->len = 0;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__MINGW32__)
                         ev_io_stop(EV_A_ & server_recv_ctx->io);
                         ev_io_start(EV_A_ & remote->send_ctx->io);
                         ev_timer_start(EV_A_ & remote->send_ctx->watcher);
@@ -596,6 +631,37 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
     server_t *server              = remote->server;
 
     if (!remote_send_ctx->connected) {
+#ifdef TCP_FASTOPEN_WINSOCK
+        if (fast_open) {
+            // Check if ConnectEx is done
+            if (!remote->connect_ex_done) {
+                DWORD numBytes;
+                DWORD flags;
+                // Non-blocking way to fetch ConnectEx result
+                if (WSAGetOverlappedResult(remote->fd, &remote->olap,
+                                           &numBytes, FALSE, &flags)) {
+                    remote->buf->len -= numBytes;
+                    remote->buf->idx  = numBytes;
+                    remote->connect_ex_done = 1;
+                } else if (WSAGetLastError() == WSA_IO_INCOMPLETE) {
+                    // XXX: ConnectEx still not connected, wait for next time
+                    return;
+                } else {
+                    ERROR("WSAGetOverlappedResult");
+                    // not connected
+                    close_and_free_remote(EV_A_ remote);
+                    close_and_free_server(EV_A_ server);
+                    return;
+                };
+            }
+
+            // Make getpeername work
+            if (setsockopt(remote->fd, SOL_SOCKET,
+                           SO_UPDATE_CONNECT_CONTEXT, NULL, 0) != 0) {
+                ERROR("setsockopt");
+            }
+        }
+#endif
         struct sockaddr_storage addr;
         socklen_t len = sizeof addr;
         int r         = getpeername(remote->fd, (struct sockaddr *)&addr, &len);
@@ -672,8 +738,8 @@ new_remote(int fd, int timeout)
     remote->recv_ctx->remote    = remote;
     remote->send_ctx->remote    = remote;
 
-    __ev_io_init(&remote->recv_ctx->io, remote_recv_cb, fd, EV_READ);
-    __ev_io_init(&remote->send_ctx->io, remote_send_cb, fd, EV_WRITE);
+    ev_io_init(&remote->recv_ctx->io, remote_recv_cb, fd, EV_READ);
+    ev_io_init(&remote->send_ctx->io, remote_send_cb, fd, EV_WRITE);
     ev_timer_init(&remote->send_ctx->watcher, remote_timeout_cb,
                   min(MAX_CONNECT_TIMEOUT, timeout), 0);
     ev_timer_init(&remote->recv_ctx->watcher, remote_timeout_cb,
@@ -736,8 +802,8 @@ new_server(int fd)
         memset(server->obfs, 0, sizeof(obfs_t));
     }
 
-    __ev_io_init(&server->recv_ctx->io, server_recv_cb, fd, EV_READ);
-    __ev_io_init(&server->send_ctx->io, server_send_cb, fd, EV_WRITE);
+    ev_io_init(&server->recv_ctx->io, server_recv_cb, fd, EV_READ);
+    ev_io_init(&server->send_ctx->io, server_send_cb, fd, EV_WRITE);
 
     cork_dllist_add(&connections, &server->entries);
 
@@ -827,7 +893,6 @@ create_remote(listen_ctx_t *listener,
     return remote;
 }
 
-#ifndef __MINGW32__
 static void
 signal_cb(EV_P_ ev_signal *w, int revents)
 {
@@ -835,13 +900,14 @@ signal_cb(EV_P_ ev_signal *w, int revents)
         switch (w->signum) {
         case SIGINT:
         case SIGTERM:
+#ifndef __MINGW32__
         case SIGUSR1:
+#endif
             keep_resolving = 0;
             ev_unloop(EV_A_ EVUNLOOP_ALL);
         }
     }
 }
-#endif
 
 void
 accept_cb(EV_P_ ev_io *w, int revents)
@@ -878,7 +944,8 @@ main(int argc, char **argv)
     char *pid_path   = NULL;
     char *conf_path  = NULL;
     char *iface      = NULL;
-    char *obfs_host   = NULL;
+    char *obfs_host  = NULL;
+    char *obfs_uri   = NULL;
 
     srand(time(NULL));
 
@@ -962,6 +1029,8 @@ main(int argc, char **argv)
                         obfs_para = obfs_tls;
                 } else if (strcmp(key, "obfs-host") == 0) {
                     obfs_host = value;
+                } else if (strcmp(key, "obfs-uri") == 0) {
+                    obfs_uri = value;
 #ifdef __linux__
                 } else if (strcmp(key, "mptcp") == 0) {
                     mptcp = 1;
@@ -979,6 +1048,7 @@ main(int argc, char **argv)
         { "mptcp",     no_argument,       0, 0 },
         { "obfs",      required_argument, 0, 0 },
         { "obfs-host", required_argument, 0, 0 },
+        { "obfs-uri",  required_argument, 0, 0 },
         { "help",      no_argument,       0, 0 },
         { 0,           0,                 0, 0 }
     };
@@ -1009,6 +1079,8 @@ main(int argc, char **argv)
             } else if (option_index == 3) {
                 obfs_host = optarg;
             } else if (option_index == 4) {
+                obfs_uri = optarg;
+            } else if (option_index == 5) {
                 usage();
                 exit(EXIT_SUCCESS);
             }
@@ -1107,6 +1179,9 @@ main(int argc, char **argv)
         if (obfs_host == NULL) {
             obfs_host = conf->obfs_host;
         }
+        if (obfs_uri == NULL) {
+            obfs_uri = conf->obfs_uri;
+        }
         if (fast_open == 0) {
             fast_open = conf->fast_open;
         }
@@ -1173,10 +1248,13 @@ main(int argc, char **argv)
             obfs_para->host = obfs_host;
         else
             obfs_para->host = "cloudfront.net";
+        if (obfs_uri == NULL) obfs_para->uri = "/";
+        else obfs_para->uri = obfs_uri;
         obfs_para->port = atoi(remote_port);
         LOGI("obfuscating enabled");
         if (obfs_host)
             LOGI("obfuscating hostname: %s", obfs_host);
+        if (obfs_uri) LOGI("obfuscation uri path: %s", obfs_uri);
     }
 
 #ifdef __MINGW32__
@@ -1207,7 +1285,6 @@ main(int argc, char **argv)
     listen_ctx.iface   = iface;
     listen_ctx.mptcp   = mptcp;
 
-#ifndef __MINGW32__
     // Setup signal handler
     struct ev_signal sigint_watcher;
     struct ev_signal sigterm_watcher;
@@ -1215,7 +1292,6 @@ main(int argc, char **argv)
     ev_signal_init(&sigterm_watcher, signal_cb, SIGTERM);
     ev_signal_start(EV_DEFAULT, &sigint_watcher);
     ev_signal_start(EV_DEFAULT, &sigterm_watcher);
-#endif
 
 #ifndef __MINGW32__
     ev_timer parent_watcher;
@@ -1242,7 +1318,7 @@ main(int argc, char **argv)
 
     listen_ctx.fd = listenfd;
 
-    __ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
+    ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
     ev_io_start(loop, &listen_ctx.io);
 
 #ifdef HAVE_LAUNCHD
