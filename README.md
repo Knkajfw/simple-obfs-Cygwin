@@ -1,5 +1,7 @@
 # simple-obfs
 
+Deprecated. Followed by [v2ray-plugin](https://github.com/shadowsocks/v2ray-plugin).
+
 ## Intro
 
 Simple-obfs is a simple obfusacting tool, designed as plugin server of shadowsocks.
@@ -14,11 +16,11 @@ e.g. Ubuntu, Debian or Linux Mint, you can build the binary like this:
 # Debian / Ubuntu
 sudo apt-get install --no-install-recommends build-essential autoconf libtool libssl-dev libpcre3-dev libev-dev asciidoc xmlto automake
 # CentOS / Fedora / RHEL
-sudo yum install gcc autoconf libtool automake make zlib-devel openssl-devel asciidoc xmlto
+sudo yum install gcc autoconf libtool automake make zlib-devel openssl-devel asciidoc xmlto libev-devel
 # Arch
 sudo pacman -Syu gcc autoconf libtool automake make zlib openssl asciidoc xmlto
 # Alpine
-apk add gcc autoconf make libtool automake zlib-devel openssl asciidoc xmlto libpcre32 libev-dev g++ linux-headers
+apk add gcc autoconf make libtool automake zlib-dev openssl asciidoc xmlto libpcre32 libev-dev g++ linux-headers
 
 git clone https://github.com/shadowsocks/simple-obfs.git
 cd simple-obfs
